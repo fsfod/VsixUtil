@@ -44,7 +44,7 @@ namespace VsixUtil
         {
             if (createDomain)
             {
-                //AppDomain.Unload(appDomain);
+                AppDomain.Unload(appDomain);
             }
         }
 
