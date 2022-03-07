@@ -38,6 +38,9 @@ namespace VsixUtil
                 case VsVersion.Vs2019:
                     suffix = ".15.0";
                     break;
+                case VsVersion.Vs2022:
+                    suffix = ".15.0";
+                    break;
                 default:
                     throw new Exception("Bad Version");
             }
