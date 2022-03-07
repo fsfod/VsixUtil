@@ -2,6 +2,10 @@
 using System.Linq;
 using System.Reflection;
 using Microsoft.VisualStudio.ExtensionManager;
+using ImpromptuInterface;
+using ImpromptuInterface.Optimization;
+using ImpromptuInterface.Build;
+using System.Collections.Generic;
 
 namespace VsixUtil
 {
@@ -55,7 +59,7 @@ namespace VsixUtil
             return assembly.GetType("Microsoft.VisualStudio.ExtensionManager.ExtensionManagerService");
         }
 
-        public static IVsExtensionManager CreateExtensionManager(InstalledVersion installedVersion, string rootSuffix)
+        public static IVsExtensionManager CreateExtensionManager(InstalledVersion installedVersion, string rootSuffix, ExtensionManagerServiceMode loadMode = ExtensionManagerServiceMode.Default)
         {
             var settingsAssembly = LoadSettingsAssembly(installedVersion.VsVersion);
 
@@ -73,14 +77,177 @@ namespace VsixUtil
                 })
                 .FirstOrDefault()
                 .Invoke(null, new[] { installedVersion.ApplicationPath, rootSuffix });
-
+            
             var extensionManagerServiceType = GetExtensionManagerServiceType(installedVersion.VsVersion);
-            var extensionManager = (IVsExtensionManager)extensionManagerServiceType
-                .GetConstructors()
-                .Where(x => x.GetParameters().Length == 1 && x.GetParameters()[0].ParameterType.IsAssignableFrom(settingsManager.GetType()))
-                .FirstOrDefault()
-                .Invoke(new[] { settingsManager });
-            return extensionManager;
+
+            object extensionManager = null;
+
+            bool safeMode = false;
+            bool skipSdkDirectories = false;
+            bool scanAlways = false;
+            bool verboseLog = true;
+
+            if (false)
+            {
+                extensionManager = Activator.CreateInstance(extensionManagerServiceType, settingsManager);
+            }
+            else
+            {
+                var assembly = extensionManagerServiceType.Assembly;
+                var modeType = assembly.GetType("Microsoft.VisualStudio.ExtensionManager.ExtensionManagerServiceMode");
+
+                int mode = 0;
+
+                if (safeMode && !TrySetEnumFlag(modeType, ExtensionManagerServiceMode.SafeMode, ref mode))
+                {
+                    throw new InvalidOperationException("Safe mode option no longer exists");
+                }
+
+                if (skipSdkDirectories && !TrySetEnumFlag(modeType, ExtensionManagerServiceMode.DoNotScanSdkDirectories, ref mode))
+                {
+                    throw new InvalidOperationException("SkipSdkDirectories mode option no longer exists");
+                }
+
+                if (scanAlways && !TrySetEnumFlag(modeType, ExtensionManagerServiceMode.ScanAlways, ref mode))
+                {
+                    throw new InvalidOperationException("ScanAlways mode option no longer exists");
+                }
+
+
+
+                var constructors = extensionManagerServiceType.GetConstructors().ToList();
+
+                var loggerType = constructors.SelectMany(c => c.GetParameters()).
+                                 Where(p => p.ParameterType.Name == "ILogger").
+                                 Select(p => p.ParameterType).
+                                 FirstOrDefault();
+
+                var logger = new Logger(verboseLog);
+                var vslogger =  ActLike(logger, loggerType);
+                var modeValue = Enum.ToObject(modeType, mode);
+
+                extensionManager = Activator.CreateInstance(extensionManagerServiceType, settingsManager, modeValue, vslogger);
+            }          
+
+            var wrap = extensionManager.ActLike<IVsExtensionManager>();
+
+            return (IVsExtensionManager)wrap;
+        }
+
+        static int? GetEnumValue<T>(Type type, T value) where T : Enum {
+            string name = Enum.GetName(typeof(T), value);
+            var a =  Enum.Parse(type, name);
+            return a != null ? (int?)Convert.ToInt32(a) : null;
+        }
+
+        static bool TrySetEnumFlag<T>(Type type, T value, ref int flags) where T : Enum {
+            var enumValue = GetEnumValue(type, value);
+            if (enumValue.HasValue)
+            {
+                flags |= enumValue.Value;
+            }
+            return enumValue.HasValue;
+        }
+
+        private static object ActLike(object originalDynamic, Type targetType, params Type[] otherInterfaces)
+        {
+            Type tContext;
+            bool tDummy;
+            originalDynamic = originalDynamic.GetTargetContext(out tContext, out tDummy);
+            tContext = tContext.FixContext();
+
+            var tProxy = BuildProxy.BuildType(tContext, targetType, otherInterfaces);
+
+            return InitializeProxy(tProxy, originalDynamic, new[] { targetType }.Concat(otherInterfaces));
+        }
+
+        internal static object InitializeProxy(Type proxytype, object original, IEnumerable<Type> interfaces = null, IDictionary<string, Type> propertySpec = null)
+        {
+            var tProxy = (IActLikeProxyInitialize)Activator.CreateInstance(proxytype);
+            tProxy.Initialize(original, interfaces, propertySpec);
+            return tProxy;
+        }
+    }
+
+    [Flags]
+    public enum ExtensionManagerServiceMode
+    {
+        Default = 0,
+        SafeMode = 1,
+        DoNotLoadUserExtensions = 2,
+        ScanAlways = 4,
+        DoNotScanSdkDirectories = 8
+    }
+
+    public interface VSILogger
+    {
+        void LogInformation(string message);
+
+        void LogInformation(string message, string path);
+
+        void LogWarning(string message);
+
+        void LogWarning(string message, string path);
+
+        void LogError(string message);
+
+        void LogError(string errorMessage, string path);
+    }
+
+
+    public class Logger : VSILogger
+    {
+        public int Level { get; set; } = 1;
+
+        public Logger(bool verboseLog)
+        {
+            Level = verboseLog ? 2 : 1;
+        }
+
+        public void LogError(string msg)
+        {
+            Console.WriteLine($"Error: {msg}");
+        }
+
+        public void LogError(string msg, string path)
+        {
+            Console.WriteLine($"Error: {msg}, path = {path}");
+        }
+
+        public void LogInformation(string msg)
+        {
+            if (Level < 2)
+            {
+                return;
+            }
+            Console.WriteLine($"Info: {msg}");
+        }
+
+        public void LogInformation(string msg, string path)
+        {
+            if (Level < 2)
+            {
+                return;
+            }
+            Console.WriteLine($"Info: {msg}, path = {path}");
+        }
+
+        public void LogWarning(string msg)
+        {
+            if (Level < 1)
+            {
+                return;
+            }
+            Console.WriteLine($"Warning: {msg}");
+        }
+
+        public void LogWarning(string msg, string path)
+        {
+            if (Level < 1)
+            {
+                return;
+            }
+            Console.WriteLine($"Warning: {msg}, path = {path}");
         }
     }
 }
